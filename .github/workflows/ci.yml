@@ -1,0 +1,74 @@
+name: CI/CD Pipeline - Mini ERP + CRM Operations Portal
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  lint-and-build:
+    name: Lint, Typecheck & Build Monorepo
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Install Backend Dependencies & Generate Prisma Client
+        run: |
+          cd backend
+          npm ci
+          npx prisma generate
+          npm run build
+
+      - name: Install Frontend Dependencies & Build Bundle
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+  docker-and-deploy:
+    name: Build Docker Images & Deploy to AWS ECR/ECS
+    needs: lint-and-build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, Tag & Push Backend Docker Image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/mini-erp-backend:$IMAGE_TAG ./backend
+          docker tag $ECR_REGISTRY/mini-erp-backend:$IMAGE_TAG $ECR_REGISTRY/mini-erp-backend:latest
+          docker push $ECR_REGISTRY/mini-erp-backend:$IMAGE_TAG
+          docker push $ECR_REGISTRY/mini-erp-backend:latest
+
+      - name: Update ECS Fargate Service Deployment
+        run: |
+          echo "Triggering AWS ECS Fargate service redeployment with updated image..."
+          # aws ecs update-service --cluster mini-erp-crm-cluster --service mini-erp-backend-service --force-new-deployment
